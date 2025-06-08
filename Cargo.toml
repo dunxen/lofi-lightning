@@ -1,0 +1,9 @@
+[package]
+name = "lofi-lightning"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+ldk-node = "0.6.0"
+rustyline = "16.0.0"
