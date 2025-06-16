@@ -1,7 +1,13 @@
-use std::{sync::Arc, thread};
+use std::{str::FromStr, sync::Arc, thread, time::Duration};
 
-use ldk_node::{bitcoin::Network, Builder, Node};
-use rustyline::DefaultEditor;
+use ldk_node::{
+    bip39::{self, Mnemonic},
+    bitcoin::{secp256k1::PublicKey, Address, Network},
+    lightning::ln::msgs::SocketAddress,
+    lightning_invoice::{Bolt11InvoiceDescription, Description, DEFAULT_EXPIRY_TIME},
+    Builder, Node,
+};
+use rustyline::{error::ReadlineError, DefaultEditor};
 
 fn main() -> anyhow::Result<()> {
     // --- STEP 1: Setup ---
@@ -39,37 +45,164 @@ fn main() -> anyhow::Result<()> {
 
     // We start the loop for reading from stdin
     loop {
-        // --- STEP 2: Use rustyline to read from stdin
-        //             Start by handling CTRL-C and CTRL-D keyboard interrupts which should stop
-        //             the lightning node gracefully. These appear as ReadlineError::Interrupted
-        //             and RealineError::Eof in the Err() case respectively.
-        //             If a line is successfully read (the Ok() case), then it should be parsed
-        //             as a command and run if possible by calling out to parse_and_execute_command.
-        //
-        // TODO
+        let readline = rl.readline(">> ");
+        match readline {
+            Ok(line) => {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                parse_and_execute_command(words, &node)?;
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("CTRL-D");
+                break;
+            }
+            Err(err) => {
+                println!("Error: {:?}", err);
+                break;
+            }
+        }
     }
+
+    node.stop()?;
+    Ok(())
 }
 
 fn parse_and_execute_command(words: Vec<&str>, node: &Node) -> anyhow::Result<()> {
-    // TODO: Implement me by parsing commands and their arguments and then call the appropriate
-    //       methods on Node.
-    //
-    // Some commands to implement:
-    //     listpeers: list the peers connected to this node
-    //     listchannels: list all channels of this node
-    //     getnewfundingaddress: get a new onchain address to fund this node's onchain wallet
-    //     openchannel: open a channel to a given peer with a given amount of msats
-    //     sendtoaddress: send a given amount of sats onchain to an address
-    //     listbalances: list all balances of this node including onchain and offchain balances
-    //     paykeysend: pay over lightning directly to a node ID using spontaneous payments (keysend)
-    //     createinvoice: create a single use BOLT 11 invoice
-    //     ... and more!
+    if words.len() < 1 {
+        println!("Invalid command");
+        return Ok(());
+    }
+
+    match words[0] {
+        "listpeers" => {
+            let peers = node.list_peers();
+            if peers.is_empty() {
+                println!("No connected peers");
+                return Ok(());
+            }
+            for peer in peers {
+                println!("{peer:?}");
+            }
+        }
+        "listchannels" => {
+            let channels = node.list_channels();
+            if channels.is_empty() {
+                println!("No known channels");
+                return Ok(());
+            }
+            for channel in channels {
+                println!("{channel:?}");
+            }
+        }
+        "getnewfundingaddress" => {
+            let funding_address = node.onchain_payment().new_address()?;
+            println!("New funding address: {funding_address}");
+        }
+        "openchannel" => {
+            if words.len() < 2 {
+                println!("Please provide the node ID, network address, and channel amount");
+                return Ok(());
+            }
+
+            if words.len() < 3 {
+                println!("Please provide the network address and channel amount");
+                return Ok(());
+            }
+
+            if words.len() < 4 {
+                println!("Please provide the channel amount");
+                return Ok(());
+            }
+
+            let node_id = PublicKey::from_str(words[1])?;
+            let network_address = SocketAddress::from_str(words[2]).unwrap();
+            let amount: u64 = words[3].parse()?;
+
+            let user_channel_id =
+                node.open_channel(node_id, network_address, amount, None, None)?;
+
+            println!("User channel ID: {}", user_channel_id.0);
+        }
+        "sendtoaddress" => {
+            if words.len() < 2 {
+                println!("Please provide the address and sats amount");
+                return Ok(());
+            }
+
+            if words.len() < 3 {
+                println!("Please provide the sats amount");
+                return Ok(());
+            }
+
+            let address = Address::from_str(words[1])?.require_network(Network::Signet)?;
+            let amount_sats: u64 = words[2].parse()?;
+
+            let onchain = node.onchain_payment();
+            let txid = onchain.send_to_address(&address, amount_sats, None)?;
+            println!("Sending {amount_sats} sats to {address} onchain via {txid}");
+        }
+        "listbalances" => {
+            let balances = node.list_balances();
+            println!(
+                "Total onchain balance: {} sats\nSpendable onchain balance {} sats\nTotal lightning balance {} sats",
+                balances.total_onchain_balance_sats,
+                balances.spendable_onchain_balance_sats,
+                balances.total_lightning_balance_sats
+            );
+        }
+        "paykeysend" => {
+            if words.len() < 2 {
+                println!("Please provide the msat amount");
+                return Ok(());
+            }
+
+            if words.len() < 3 {
+                println!("Please provide the node id");
+                return Ok(());
+            }
+
+            let amount_msat: u64 = words[1].parse()?;
+            let node_id = PublicKey::from_str(words[2])?;
+
+            let payment = node.spontaneous_payment();
+            payment.send(amount_msat, node_id, None)?;
+        }
+        "createinvoice" => {
+            let description = Bolt11InvoiceDescription::Direct(Description::new(
+                words.get(2).unwrap_or(&"Lightning invoice").to_string(),
+            )?);
+            let invoice =
+                if let Some(Ok(amount_msat)) = words.get(1).map(|value| value.parse::<u64>()) {
+                    node.bolt11_payment().receive(
+                        amount_msat,
+                        &description,
+                        DEFAULT_EXPIRY_TIME as u32,
+                    )?
+                } else {
+                    node.bolt11_payment()
+                        .receive_variable_amount(&description, DEFAULT_EXPIRY_TIME as u32)?
+                };
+            println!("{invoice}");
+        }
+        _ => {
+            println!("Invalid command");
+            return Ok(());
+        }
+    }
+
     Ok(())
 }
 
 fn handle_events(node: Arc<Node>) -> anyhow::Result<()> {
     loop {
-        // TODO: Print the next event if available and mark it as handled so ldk-node doesn't keep
-        //       emitting it, else put the thread to sleep for a bit.
+        if let Some(event) = node.next_event() {
+            println!("{event:?}");
+            node.event_handled()?;
+        } else {
+            thread::sleep(Duration::from_secs(1));
+        }
     }
 }
