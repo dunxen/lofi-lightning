@@ -25,7 +25,7 @@ This workshop has a start, a few steps, but the rest is up to you. Let's see wha
 
 If you've never used Rust before, you'll need a Rust toolchain. The easiest way to manage Rust toolchains is
 via https://rustup.rs. If (rightfully so) you don't feel comfortable directly executing the response of a curl,
-install rustup through your package manager of choice. You'll need at least Rust version 1.75 to work with LDK Node.
+install rustup through your package manager of choice. You'll need at least Rust version 1.85 to work with LDK Node with edition 2024.
 
 ### Clone this repository
 
